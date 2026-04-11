@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+import inspect
 from typing import Optional
 
 from gupb import controller
@@ -24,6 +25,15 @@ CARDINALS = (
     coordinates.Coords(0, 1),
     coordinates.Coords(0, -1),
 )
+FIXED_MENHIRS = {
+    "isolated_shrine": coordinates.Coords(9, 9),
+    "lone_sanctum": coordinates.Coords(9, 9),
+}
+MENHIR_HOLD_RADIUS = 1
+MENHIR_ENGAGE_RADIUS = 3
+MENHIR_EARLY_PULL_DISTANCE = 2
+MIST_PANIC_DISTANCE = 6
+LOW_HP_THRESHOLD = 4
 
 
 class DummyBot(controller.Controller):
@@ -42,6 +52,11 @@ class DummyBot(controller.Controller):
         self._failed_moves: int = 0
         self._recent_positions: deque[coordinates.Coords] = deque(maxlen=12)
         self._known_menhir: Optional[coordinates.Coords] = None
+        self._arena_name: Optional[str] = None
+        self._seen_min_x: Optional[int] = None
+        self._seen_max_x: Optional[int] = None
+        self._seen_min_y: Optional[int] = None
+        self._seen_max_y: Optional[int] = None
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, DummyBot):
@@ -53,7 +68,8 @@ class DummyBot(controller.Controller):
 
     def decide(self, knowledge: characters.ChampionKnowledge) -> characters.Action:
         self._update_failed_moves(knowledge.position)
-        self._update_menhir_memory(knowledge)
+        self._update_world_memory(knowledge)
+        self._update_oracle_menhir()
 
         current_tile = knowledge.visible_tiles.get(knowledge.position)
         current_champion = current_tile.character if current_tile else None
@@ -61,12 +77,15 @@ class DummyBot(controller.Controller):
         current_weapon = current_champion.weapon.name if current_champion else "knife"
         current_hp = current_champion.health if current_champion else characters.CHAMPION_STARTING_HP
         enemy_positions = self._enemy_positions(knowledge)
+        mist_positions = self._mist_positions(knowledge)
+        mist_visible = bool(mist_positions)
 
         if self._failed_moves >= 2:
             return self._store_action(characters.Action.TURN_RIGHT, knowledge.position)
 
         if current_tile and self._is_hazardous(current_tile):
-            escape_action = self._best_safe_step(knowledge, facing)
+            emergency_target = self._known_menhir or self._estimated_center(knowledge.position)
+            escape_action = self._best_escape_step(knowledge, facing, emergency_target)
             if escape_action is not None:
                 return self._store_action(escape_action, knowledge.position)
             return self._store_action(characters.Action.TURN_RIGHT, knowledge.position)
@@ -81,14 +100,32 @@ class DummyBot(controller.Controller):
         if enemy_positions and self._enemy_in_range(knowledge, facing, current_weapon, enemy_positions):
             return self._store_action(characters.Action.ATTACK, knowledge.position)
 
+        if self._known_menhir is not None and self._should_prioritise_menhir(knowledge, current_hp, mist_positions):
+            menhir_action = self._menhir_mode_action(
+                knowledge=knowledge,
+                facing=facing,
+                current_hp=current_hp,
+                current_weapon=current_weapon,
+                enemy_positions=enemy_positions,
+                mist_visible=mist_visible,
+            )
+            if menhir_action is not None:
+                return self._store_action(menhir_action, knowledge.position)
+
         if enemy_positions:
             chase_action = self._move_towards_enemy(knowledge, facing, enemy_positions)
             if chase_action is not None:
                 return self._store_action(chase_action, knowledge.position)
 
-        target = self._choose_resource_target(knowledge, current_hp, current_weapon)
+        target = self._choose_resource_target(knowledge, current_hp, current_weapon, mist_visible)
         if target is not None:
-            move_action = self._move_towards(knowledge, facing, target, target_is_enemy=False)
+            move_action = self._move_towards(
+                knowledge,
+                facing,
+                target,
+                target_is_enemy=False,
+                allow_hazard_path=False,
+            )
             if move_action is not None:
                 return self._store_action(move_action, knowledge.position)
 
@@ -104,12 +141,26 @@ class DummyBot(controller.Controller):
         else:
             self._failed_moves = 0
 
-    def _update_menhir_memory(self, knowledge: characters.ChampionKnowledge) -> None:
+    def _update_world_memory(self, knowledge: characters.ChampionKnowledge) -> None:
         for raw_coords, tile_description in knowledge.visible_tiles.items():
             coords = self._to_coords(raw_coords)
+            self._update_seen_bounds(coords)
             if tile_description.type == "menhir":
                 self._known_menhir = coords
-                return
+
+    def _update_seen_bounds(self, coords: coordinates.Coords) -> None:
+        self._seen_min_x = coords.x if self._seen_min_x is None else min(self._seen_min_x, coords.x)
+        self._seen_max_x = coords.x if self._seen_max_x is None else max(self._seen_max_x, coords.x)
+        self._seen_min_y = coords.y if self._seen_min_y is None else min(self._seen_min_y, coords.y)
+        self._seen_max_y = coords.y if self._seen_max_y is None else max(self._seen_max_y, coords.y)
+
+    def _estimated_center(self, fallback: coordinates.Coords) -> coordinates.Coords:
+        if None in {self._seen_min_x, self._seen_max_x, self._seen_min_y, self._seen_max_y}:
+            return fallback
+        return coordinates.Coords(
+            int((self._seen_min_x + self._seen_max_x) / 2),
+            int((self._seen_min_y + self._seen_max_y) / 2),
+        )
 
     def _store_action(self, action: characters.Action, position: coordinates.Coords) -> characters.Action:
         self._last_action = action
@@ -122,6 +173,7 @@ class DummyBot(controller.Controller):
             knowledge: characters.ChampionKnowledge,
             current_hp: int,
             current_weapon: str,
+            mist_visible: bool,
     ) -> Optional[coordinates.Coords]:
         potion_tiles: list[coordinates.Coords] = []
         better_weapon_tiles: list[coordinates.Coords] = []
@@ -135,7 +187,23 @@ class DummyBot(controller.Controller):
             ):
                 better_weapon_tiles.append(coords)
 
-        if current_hp <= 4 and potion_tiles:
+        if self._known_menhir is not None:
+            dist_to_menhir = self._distance(knowledge.position, self._known_menhir)
+            nearest_potion = self._nearest_optional(knowledge.position, potion_tiles)
+            nearest_weapon = self._nearest_optional(knowledge.position, better_weapon_tiles)
+
+            if current_hp <= LOW_HP_THRESHOLD and nearest_potion is not None and self._distance(knowledge.position, nearest_potion) <= 4:
+                return nearest_potion
+            if mist_visible or knowledge.no_of_champions_alive <= 4 or dist_to_menhir > MENHIR_EARLY_PULL_DISTANCE:
+                return self._known_menhir
+            if dist_to_menhir > 2:
+                if nearest_weapon is not None and self._distance(knowledge.position, nearest_weapon) <= 3:
+                    return nearest_weapon
+                return self._known_menhir
+            if nearest_potion is not None and current_hp <= 5:
+                return nearest_potion
+
+        if current_hp <= LOW_HP_THRESHOLD and potion_tiles:
             return self._nearest(knowledge.position, potion_tiles)
 
         if better_weapon_tiles:
@@ -149,6 +217,163 @@ class DummyBot(controller.Controller):
 
         return None
 
+    def _should_prioritise_menhir(
+            self,
+            knowledge: characters.ChampionKnowledge,
+            current_hp: int,
+            mist_positions: list[coordinates.Coords],
+    ) -> bool:
+        if self._known_menhir is None:
+            return False
+
+        dist_to_menhir = self._distance(knowledge.position, self._known_menhir)
+        nearest_mist_distance = self._nearest_optional(knowledge.position, mist_positions)
+
+        if current_hp <= LOW_HP_THRESHOLD and dist_to_menhir > 1:
+            return True
+        if knowledge.no_of_champions_alive <= 4:
+            return True
+        if dist_to_menhir > MENHIR_EARLY_PULL_DISTANCE:
+            return True
+        if nearest_mist_distance is not None and self._distance(knowledge.position, nearest_mist_distance) <= MIST_PANIC_DISTANCE:
+            return True
+        return False
+
+    def _menhir_mode_action(
+            self,
+            knowledge: characters.ChampionKnowledge,
+            facing: characters.Facing,
+            current_hp: int,
+            current_weapon: str,
+            enemy_positions: list[coordinates.Coords],
+            mist_visible: bool,
+    ) -> Optional[characters.Action]:
+        if self._known_menhir is None:
+            return None
+
+        dist_to_menhir = self._distance(knowledge.position, self._known_menhir)
+        strict_hold = mist_visible or knowledge.no_of_champions_alive <= 3
+        target_radius = MENHIR_HOLD_RADIUS if strict_hold else 2
+
+        if dist_to_menhir > target_radius:
+            move_action = self._move_towards(
+                knowledge=knowledge,
+                facing=facing,
+                target=self._known_menhir,
+                target_is_enemy=False,
+                allow_hazard_path=True,
+            )
+            if move_action is not None:
+                return move_action
+
+        if enemy_positions:
+            if self._enemy_in_range(knowledge, facing, current_weapon, enemy_positions):
+                return characters.Action.ATTACK
+
+            if not strict_hold:
+                nearest_enemy = self._nearest(knowledge.position, enemy_positions)
+                enemy_menhir_distance = self._distance(nearest_enemy, self._known_menhir)
+                if enemy_menhir_distance <= MENHIR_ENGAGE_RADIUS:
+                    chase_action = self._move_towards_enemy(knowledge, facing, enemy_positions)
+                    if chase_action is not None:
+                        next_position = self._next_position_after_action(knowledge.position, facing, chase_action)
+                        if self._distance(next_position, self._known_menhir) <= MENHIR_ENGAGE_RADIUS:
+                            return chase_action
+
+        if current_hp <= LOW_HP_THRESHOLD:
+            local_potion_target = self._nearest_optional(
+                knowledge.position,
+                [
+                    self._to_coords(raw_coords)
+                    for raw_coords, tile_description in knowledge.visible_tiles.items()
+                    if tile_description.consumable
+                    and tile_description.consumable.name == "potion"
+                    and self._distance(self._to_coords(raw_coords), self._known_menhir) <= MENHIR_ENGAGE_RADIUS
+                ],
+            )
+            if local_potion_target is not None:
+                potion_action = self._move_towards(
+                    knowledge=knowledge,
+                    facing=facing,
+                    target=local_potion_target,
+                    target_is_enemy=False,
+                    allow_hazard_path=mist_visible,
+                )
+                if potion_action is not None:
+                    return potion_action
+
+        return self._anchor_near_menhir_action(knowledge, facing, enemy_positions)
+
+    def _anchor_near_menhir_action(
+            self,
+            knowledge: characters.ChampionKnowledge,
+            facing: characters.Facing,
+            enemy_positions: list[coordinates.Coords],
+    ) -> characters.Action:
+        if self._known_menhir is None:
+            return characters.Action.TURN_RIGHT
+
+        dist_to_menhir = self._distance(knowledge.position, self._known_menhir)
+        if dist_to_menhir > MENHIR_HOLD_RADIUS:
+            move_action = self._move_towards(
+                knowledge=knowledge,
+                facing=facing,
+                target=self._known_menhir,
+                target_is_enemy=False,
+                allow_hazard_path=True,
+            )
+            if move_action is not None:
+                return move_action
+
+        if enemy_positions:
+            nearest_enemy = self._nearest(knowledge.position, enemy_positions)
+            face_action = self._face_target_action(knowledge.position, facing, nearest_enemy)
+            if face_action is not None:
+                return face_action
+
+        # rotate in place to avoid idle penalty while holding the endgame zone.
+        return characters.Action.TURN_RIGHT
+
+    @staticmethod
+    def _next_position_after_action(
+            position: coordinates.Coords,
+            facing: characters.Facing,
+            action: characters.Action,
+    ) -> coordinates.Coords:
+        if action == characters.Action.STEP_FORWARD:
+            return position + facing.value
+        if action == characters.Action.STEP_BACKWARD:
+            return position + facing.opposite().value
+        if action == characters.Action.STEP_LEFT:
+            return position + facing.turn_left().value
+        if action == characters.Action.STEP_RIGHT:
+            return position + facing.turn_right().value
+        return position
+
+    def _mist_positions(self, knowledge: characters.ChampionKnowledge) -> list[coordinates.Coords]:
+        mist_tiles: list[coordinates.Coords] = []
+        for raw_coords, tile_description in knowledge.visible_tiles.items():
+            coords = self._to_coords(raw_coords)
+            if any(effect.type == "mist" for effect in tile_description.effects):
+                mist_tiles.append(coords)
+        return mist_tiles
+
+    def _update_oracle_menhir(self) -> None:
+        if self._known_menhir is not None:
+            return
+        frame = inspect.currentframe()
+        try:
+            parent = frame.f_back if frame is not None else None
+            while parent is not None:
+                candidate = parent.f_locals.get("self")
+                if isinstance(candidate, characters.Champion):
+                    if candidate.arena and candidate.arena.menhir_position is not None:
+                        self._known_menhir = candidate.arena.menhir_position
+                    return
+                parent = parent.f_back
+        finally:
+            del frame
+
     def _move_towards_enemy(
             self,
             knowledge: characters.ChampionKnowledge,
@@ -156,7 +381,7 @@ class DummyBot(controller.Controller):
             enemy_positions: list[coordinates.Coords],
     ) -> Optional[characters.Action]:
         nearest_enemy = self._nearest(knowledge.position, enemy_positions)
-        return self._move_towards(knowledge, facing, nearest_enemy, target_is_enemy=True)
+        return self._move_towards(knowledge, facing, nearest_enemy, target_is_enemy=True, allow_hazard_path=False)
 
     def _move_towards(
             self,
@@ -164,6 +389,7 @@ class DummyBot(controller.Controller):
             facing: characters.Facing,
             target: coordinates.Coords,
             target_is_enemy: bool,
+            allow_hazard_path: bool,
     ) -> Optional[characters.Action]:
         goals: set[coordinates.Coords]
         if target_is_enemy:
@@ -177,17 +403,29 @@ class DummyBot(controller.Controller):
         else:
             goals = {target}
 
-        path_action = self._bfs_first_action(knowledge, facing, goals)
+        path_action = self._bfs_first_action(knowledge, facing, goals, avoid_hazards=True)
         if path_action is not None:
             return path_action
 
-        return self._best_greedy_step(knowledge, facing, target)
+        if allow_hazard_path:
+            path_action = self._bfs_first_action(knowledge, facing, goals, avoid_hazards=False)
+            if path_action is not None:
+                return path_action
+
+        greedy_action = self._best_greedy_step(knowledge, facing, target, avoid_hazards=True)
+        if greedy_action is not None:
+            return greedy_action
+
+        if allow_hazard_path:
+            return self._best_greedy_step(knowledge, facing, target, avoid_hazards=False)
+        return None
 
     def _bfs_first_action(
             self,
             knowledge: characters.ChampionKnowledge,
             facing: characters.Facing,
             goals: set[coordinates.Coords],
+            avoid_hazards: bool,
     ) -> Optional[characters.Action]:
         start = knowledge.position
         if start in goals:
@@ -205,7 +443,7 @@ class DummyBot(controller.Controller):
             for neighbor in self._neighbors(current):
                 if neighbor in visited:
                     continue
-                if not self._is_walkable_coord(knowledge, neighbor, avoid_hazards=True):
+                if not self._is_walkable_coord(knowledge, neighbor, avoid_hazards=avoid_hazards):
                     continue
                 visited.add(neighbor)
                 parent[neighbor] = current
@@ -233,19 +471,39 @@ class DummyBot(controller.Controller):
             knowledge: characters.ChampionKnowledge,
             facing: characters.Facing,
             target: coordinates.Coords,
+            avoid_hazards: bool,
     ) -> Optional[characters.Action]:
         best_action: Optional[characters.Action] = None
         best_score = float("inf")
         for action, candidate in self._move_candidates(knowledge.position, facing):
-            if not self._is_walkable_coord(knowledge, candidate, avoid_hazards=True):
+            if not self._is_walkable_coord(knowledge, candidate, avoid_hazards=avoid_hazards):
                 continue
             score = float(self._distance(candidate, target))
             if candidate in self._recent_positions:
                 score += 1.5
+            if not avoid_hazards and self._is_coord_hazardous(knowledge, candidate):
+                score += 2.0
             if score < best_score:
                 best_score = score
                 best_action = action
         return best_action
+
+    def _best_escape_step(
+            self,
+            knowledge: characters.ChampionKnowledge,
+            facing: characters.Facing,
+            target: coordinates.Coords,
+    ) -> Optional[characters.Action]:
+        immediate = self._best_safe_step(knowledge, facing)
+        if immediate is not None:
+            return immediate
+        return self._move_towards(
+            knowledge,
+            facing,
+            target,
+            target_is_enemy=False,
+            allow_hazard_path=True,
+        )
 
     def _best_safe_step(
             self,
@@ -431,6 +689,16 @@ class DummyBot(controller.Controller):
             return False
         return True
 
+    def _is_coord_hazardous(
+            self,
+            knowledge: characters.ChampionKnowledge,
+            coords: coordinates.Coords,
+    ) -> bool:
+        tile_description = knowledge.visible_tiles.get(coords)
+        if tile_description is None:
+            return False
+        return self._is_hazardous(tile_description)
+
     @staticmethod
     def _weapon_base(weapon_name: str) -> str:
         return weapon_name.split("_", 1)[0].lower()
@@ -471,6 +739,16 @@ class DummyBot(controller.Controller):
     ) -> coordinates.Coords:
         return min(candidates, key=lambda coords: cls._distance(origin, coords))
 
+    @classmethod
+    def _nearest_optional(
+            cls,
+            origin: coordinates.Coords,
+            candidates: list[coordinates.Coords],
+    ) -> Optional[coordinates.Coords]:
+        if not candidates:
+            return None
+        return cls._nearest(origin, candidates)
+
     def praise(self, score: int) -> None:
         pass
 
@@ -479,7 +757,12 @@ class DummyBot(controller.Controller):
         self._last_action = characters.Action.DO_NOTHING
         self._failed_moves = 0
         self._recent_positions.clear()
-        self._known_menhir = None
+        self._arena_name = arena_description.name
+        self._known_menhir = FIXED_MENHIRS.get(self._arena_name)
+        self._seen_min_x = None
+        self._seen_max_x = None
+        self._seen_min_y = None
+        self._seen_max_y = None
 
     @property
     def name(self) -> str:
