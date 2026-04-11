@@ -85,6 +85,7 @@ class DummyBot(controller.Controller):
         return hash(self.bot_name)
 
     def decide(self, knowledge: characters.ChampionKnowledge) -> characters.Action:
+        knowledge = self._normalise_knowledge(knowledge)
         self._turn_no += 1
         self._update_failed_moves(knowledge.position)
         self._update_world_memory(knowledge)
@@ -160,6 +161,17 @@ class DummyBot(controller.Controller):
 
         explore_action = self._explore_action(knowledge, facing)
         return self._store_action(explore_action, knowledge.position)
+
+    def _normalise_knowledge(self, knowledge: characters.ChampionKnowledge) -> characters.ChampionKnowledge:
+        normalised_visible_tiles = {
+            self._to_coords(raw_coords): tile_description
+            for raw_coords, tile_description in knowledge.visible_tiles.items()
+        }
+        return characters.ChampionKnowledge(
+            position=self._to_coords(knowledge.position),
+            no_of_champions_alive=knowledge.no_of_champions_alive,
+            visible_tiles=normalised_visible_tiles,
+        )
 
     def _update_failed_moves(self, current_position: coordinates.Coords) -> None:
         if self._last_position is None:
