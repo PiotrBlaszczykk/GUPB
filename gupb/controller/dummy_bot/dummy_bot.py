@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import deque
+from collections import defaultdict, deque
 import inspect
 from typing import Optional
 
@@ -34,6 +34,8 @@ MENHIR_ENGAGE_RADIUS = 3
 MENHIR_EARLY_PULL_DISTANCE = 2
 MIST_PANIC_DISTANCE = 6
 LOW_HP_THRESHOLD = 4
+ENEMY_MEMORY_TTL = 6
+CHASE_DISTANCE_LIMIT = 6
 
 
 class DummyBot(controller.Controller):
@@ -57,6 +59,11 @@ class DummyBot(controller.Controller):
         self._seen_max_x: Optional[int] = None
         self._seen_min_y: Optional[int] = None
         self._seen_max_y: Optional[int] = None
+        self._known_passable: set[coordinates.Coords] = set()
+        self._known_blocked: set[coordinates.Coords] = set()
+        self._visited_count: dict[coordinates.Coords, int] = defaultdict(int)
+        self._enemy_memory: dict[str, tuple[coordinates.Coords, int]] = {}
+        self._turn_no: int = 0
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, DummyBot):
@@ -67,9 +74,11 @@ class DummyBot(controller.Controller):
         return hash(self.bot_name)
 
     def decide(self, knowledge: characters.ChampionKnowledge) -> characters.Action:
+        self._turn_no += 1
         self._update_failed_moves(knowledge.position)
         self._update_world_memory(knowledge)
         self._update_oracle_menhir()
+        self._visited_count[knowledge.position] += 1
 
         current_tile = knowledge.visible_tiles.get(knowledge.position)
         current_champion = current_tile.character if current_tile else None
@@ -112,7 +121,13 @@ class DummyBot(controller.Controller):
             if menhir_action is not None:
                 return self._store_action(menhir_action, knowledge.position)
 
-        if enemy_positions:
+        if enemy_positions and self._should_chase_enemy(
+            knowledge=knowledge,
+            current_hp=current_hp,
+            current_weapon=current_weapon,
+            enemy_positions=enemy_positions,
+            mist_visible=mist_visible,
+        ):
             chase_action = self._move_towards_enemy(knowledge, facing, enemy_positions)
             if chase_action is not None:
                 return self._store_action(chase_action, knowledge.position)
@@ -147,6 +162,23 @@ class DummyBot(controller.Controller):
             self._update_seen_bounds(coords)
             if tile_description.type == "menhir":
                 self._known_menhir = coords
+            if tile_description.type in PASSABLE_TILE_TYPES:
+                self._known_passable.add(coords)
+                self._known_blocked.discard(coords)
+            else:
+                self._known_blocked.add(coords)
+                self._known_passable.discard(coords)
+            if tile_description.character and tile_description.character.controller_name != self.name:
+                enemy_name = tile_description.character.controller_name
+                self._enemy_memory[enemy_name] = (coords, self._turn_no)
+
+        stale_enemies = [
+            enemy_name
+            for enemy_name, (_, last_seen_turn) in self._enemy_memory.items()
+            if self._turn_no - last_seen_turn > ENEMY_MEMORY_TTL
+        ]
+        for enemy_name in stale_enemies:
+            self._enemy_memory.pop(enemy_name, None)
 
     def _update_seen_bounds(self, coords: coordinates.Coords) -> None:
         self._seen_min_x = coords.x if self._seen_min_x is None else min(self._seen_min_x, coords.x)
@@ -183,7 +215,13 @@ class DummyBot(controller.Controller):
                 potion_tiles.append(coords)
             if (
                 tile_description.loot
-                and self._weapon_rank(tile_description.loot.name) > self._weapon_rank(current_weapon)
+                and self._is_weapon_upgrade_worth_it(
+                    current_weapon=current_weapon,
+                    loot_weapon=tile_description.loot.name,
+                    knowledge=knowledge,
+                    current_hp=current_hp,
+                    mist_visible=mist_visible,
+                )
             ):
                 better_weapon_tiles.append(coords)
 
@@ -238,6 +276,39 @@ class DummyBot(controller.Controller):
         if nearest_mist_distance is not None and self._distance(knowledge.position, nearest_mist_distance) <= MIST_PANIC_DISTANCE:
             return True
         return False
+
+    def _should_chase_enemy(
+            self,
+            knowledge: characters.ChampionKnowledge,
+            current_hp: int,
+            current_weapon: str,
+            enemy_positions: list[coordinates.Coords],
+            mist_visible: bool,
+    ) -> bool:
+        if not enemy_positions:
+            return False
+
+        nearest_enemy = self._nearest(knowledge.position, enemy_positions)
+        nearest_enemy_distance = self._distance(knowledge.position, nearest_enemy)
+        weapon_base = self._weapon_base(current_weapon)
+
+        if nearest_enemy_distance > CHASE_DISTANCE_LIMIT:
+            return False
+
+        if current_hp <= 3:
+            return False
+
+        if weapon_base == "knife" and nearest_enemy_distance > 2 and current_hp <= 5:
+            return False
+
+        if self._known_menhir is not None:
+            dist_to_menhir = self._distance(knowledge.position, self._known_menhir)
+            if mist_visible and dist_to_menhir > MENHIR_HOLD_RADIUS:
+                return False
+            if knowledge.no_of_champions_alive <= 4 and dist_to_menhir > MENHIR_ENGAGE_RADIUS:
+                return False
+
+        return True
 
     def _menhir_mode_action(
             self,
@@ -481,6 +552,7 @@ class DummyBot(controller.Controller):
             score = float(self._distance(candidate, target))
             if candidate in self._recent_positions:
                 score += 1.5
+            score += 0.12 * self._visited_count.get(candidate, 0)
             if not avoid_hazards and self._is_coord_hazardous(knowledge, candidate):
                 score += 2.0
             if score < best_score:
@@ -510,6 +582,7 @@ class DummyBot(controller.Controller):
             knowledge: characters.ChampionKnowledge,
             facing: characters.Facing,
     ) -> Optional[characters.Action]:
+        center_target = self._known_menhir or self._estimated_center(knowledge.position)
         best_action: Optional[characters.Action] = None
         best_score = float("inf")
         for action, candidate in self._move_candidates(knowledge.position, facing):
@@ -518,6 +591,8 @@ class DummyBot(controller.Controller):
             score = 0.0
             if candidate in self._recent_positions:
                 score += 1.0
+            score += 0.1 * self._visited_count.get(candidate, 0)
+            score += 0.08 * self._distance(candidate, center_target)
             if score < best_score:
                 best_score = score
                 best_action = action
@@ -525,16 +600,23 @@ class DummyBot(controller.Controller):
 
     def _explore_action(self, knowledge: characters.ChampionKnowledge, facing: characters.Facing) -> characters.Action:
         position = knowledge.position
-
+        center_target = self._known_menhir or self._estimated_center(position)
+        scored_candidates: list[tuple[float, characters.Action]] = []
         for action, candidate in self._move_candidates(position, facing):
             if not self._is_walkable_coord(knowledge, candidate, avoid_hazards=True):
                 continue
-            if candidate not in self._recent_positions:
-                return action
+            score = 0.0
+            score += float(self._visited_count.get(candidate, 0))
+            if candidate in self._recent_positions:
+                score += 1.0
+            score += 0.05 * self._distance(candidate, center_target)
+            if candidate not in knowledge.visible_tiles:
+                score -= 0.35
+            scored_candidates.append((score, action))
 
-        for action, candidate in self._move_candidates(position, facing):
-            if self._is_walkable_coord(knowledge, candidate, avoid_hazards=True):
-                return action
+        if scored_candidates:
+            scored_candidates.sort(key=lambda item: item[0])
+            return scored_candidates[0][1]
 
         unknown_forward = position + facing.value
         if unknown_forward not in knowledge.visible_tiles:
@@ -662,10 +744,27 @@ class DummyBot(controller.Controller):
 
     def _enemy_positions(self, knowledge: characters.ChampionKnowledge) -> list[coordinates.Coords]:
         enemies: list[coordinates.Coords] = []
+        seen_coords: set[coordinates.Coords] = set()
+        visible_enemy_names: set[str] = set()
         for raw_coords, tile_description in knowledge.visible_tiles.items():
             coords = self._to_coords(raw_coords)
             if tile_description.character and tile_description.character.controller_name != self.name:
-                enemies.append(coords)
+                visible_enemy_names.add(tile_description.character.controller_name)
+                if coords not in seen_coords:
+                    enemies.append(coords)
+                    seen_coords.add(coords)
+
+        for enemy_name, (enemy_coords, last_seen_turn) in self._enemy_memory.items():
+            if enemy_name in visible_enemy_names:
+                continue
+            if self._turn_no - last_seen_turn > ENEMY_MEMORY_TTL:
+                continue
+            if enemy_coords in seen_coords:
+                continue
+            if enemy_coords in self._known_blocked:
+                continue
+            enemies.append(enemy_coords)
+            seen_coords.add(enemy_coords)
         return enemies
 
     @staticmethod
@@ -682,7 +781,9 @@ class DummyBot(controller.Controller):
     ) -> bool:
         tile_description = knowledge.visible_tiles.get(coords)
         if tile_description is None:
-            return False
+            if coords in self._known_blocked:
+                return False
+            return coords in self._known_passable
         if not self._is_passable(tile_description):
             return False
         if avoid_hazards and self._is_hazardous(tile_description):
@@ -698,6 +799,40 @@ class DummyBot(controller.Controller):
         if tile_description is None:
             return False
         return self._is_hazardous(tile_description)
+
+    def _is_weapon_upgrade_worth_it(
+            self,
+            current_weapon: str,
+            loot_weapon: str,
+            knowledge: characters.ChampionKnowledge,
+            current_hp: int,
+            mist_visible: bool,
+    ) -> bool:
+        current_score = self._weapon_context_score(current_weapon, knowledge, current_hp, mist_visible)
+        loot_score = self._weapon_context_score(loot_weapon, knowledge, current_hp, mist_visible)
+        return loot_score > current_score + 0.15
+
+    def _weapon_context_score(
+            self,
+            weapon_name: str,
+            knowledge: characters.ChampionKnowledge,
+            current_hp: int,
+            mist_visible: bool,
+    ) -> float:
+        base = float(self._weapon_rank(weapon_name))
+        weapon_base = self._weapon_base(weapon_name)
+        late_game = mist_visible or knowledge.no_of_champions_alive <= 4
+        if late_game:
+            if weapon_base in {"sword", "axe", "amulet", "scroll"}:
+                base += 0.65
+            if weapon_base == "bow":
+                base -= 0.45
+        if current_hp <= LOW_HP_THRESHOLD:
+            if weapon_base in {"sword", "axe", "scroll"}:
+                base += 0.25
+            if weapon_base == "bow":
+                base -= 0.2
+        return base
 
     @staticmethod
     def _weapon_base(weapon_name: str) -> str:
@@ -763,6 +898,11 @@ class DummyBot(controller.Controller):
         self._seen_max_x = None
         self._seen_min_y = None
         self._seen_max_y = None
+        self._known_passable.clear()
+        self._known_blocked.clear()
+        self._visited_count.clear()
+        self._enemy_memory.clear()
+        self._turn_no = 0
 
     @property
     def name(self) -> str:
