@@ -22,6 +22,6 @@ CONFIGURATION = {
     "visualise": False,
     "show_sight": False,
     "parallel_processes": 1,
-    "runs_no": 200,
+    "runs_no": 1000,
     "profiling_metrics": [],
 }

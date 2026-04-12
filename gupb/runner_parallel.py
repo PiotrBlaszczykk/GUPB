@@ -49,6 +49,7 @@ class _ChunkRunner:
         self.controllers: list[controller.Controller] = config["controllers"]
         self.chunk_idx = chunk_idx
         self.seed = seed
+        self.focus_controller_name: str = str(config.get("focus_controller_name", "DummyBot"))
         self.runs_no: int = config["runs_no"]
         self.start_balancing: bool = config["start_balancing"]
         self.scores: dict[str, int] = collections.defaultdict(int)
@@ -107,11 +108,11 @@ class _ChunkRunner:
         ranking = sorted(round_scores_by_name.items(), key=lambda item: item[1], reverse=True)
         winner_name = ranking[0][0]
         self.first_places[winner_name] += 1
-        if winner_name == "DummyBot":
+        if winner_name == self.focus_controller_name:
             self.dummy_first_places_by_arena[game.arena.name] += 1
 
-        dummy_score = round_scores_by_name.get("DummyBot")
-        dummy_rank = next((idx + 1 for idx, (name, _) in enumerate(ranking) if name == "DummyBot"), None)
+        dummy_score = round_scores_by_name.get(self.focus_controller_name)
+        dummy_rank = next((idx + 1 for idx, (name, _) in enumerate(ranking) if name == self.focus_controller_name), None)
         if dummy_rank is not None and dummy_rank != 1:
             self.dummy_losses_to[winner_name] += 1
 
@@ -127,7 +128,7 @@ class _ChunkRunner:
 
         for death in game.deaths:
             dead_controller = death.champion.controller
-            if dead_controller and dead_controller.name == "DummyBot":
+            if dead_controller and dead_controller.name == self.focus_controller_name:
                 dummy_death_episode = death.episode
                 if game.arena.menhir_position is not None:
                     dx = death.champion.position.x - game.arena.menhir_position.x
@@ -261,6 +262,7 @@ class RunnerParallel:
         self.profiling_metrics = config["profiling_metrics"] if "profiling_metrics" in config else None
         self.parallel_processes: int = int(config.get("parallel_processes", 1))
         self.config_path: Optional[str] = config.get("__config_path")
+        self.focus_controller_name: str = str(config.get("focus_controller_name", "DummyBot"))
         self.scores: dict[str, int] = collections.defaultdict(int)
         self.first_places: dict[str, int] = collections.defaultdict(int)
         self.games_by_arena: dict[str, int] = collections.defaultdict(int)
@@ -432,7 +434,7 @@ class RunnerParallel:
             games_successful=self.games_successful,
             games_failed=self.games_failed,
             avg_episodes=round(avg_episodes, 2),
-            dummy_first_places=self.first_places.get("DummyBot", 0),
+            dummy_first_places=self.first_places.get(self.focus_controller_name, 0),
         ).log(logging.INFO)
 
     def print_scores(self) -> None:
@@ -453,10 +455,10 @@ class RunnerParallel:
                 rate = (wins / rate_base) * 100.0
                 print(f"{int(i) + 1}.   {name}: {wins}/{rate_base} ({rate:.1f}%).")
 
-            if "DummyBot" in self.scores:
-                wins = self.first_places.get("DummyBot", 0)
+            if self.focus_controller_name in self.scores:
+                wins = self.first_places.get(self.focus_controller_name, 0)
                 rate = (wins / rate_base) * 100.0
-                print(f"DummyBot first-place rate: {wins}/{rate_base} ({rate:.1f}%).")
+                print(f"{self.focus_controller_name} first-place rate: {wins}/{rate_base} ({rate:.1f}%).")
 
         print("Parallel observability:")
         print(
@@ -478,14 +480,14 @@ class RunnerParallel:
                 f"winner={self.longest_game['winner_name']})."
             )
         if self.games_by_arena:
-            print("Arena breakdown (DummyBot first-place):")
+            print(f"Arena breakdown ({self.focus_controller_name} first-place):")
             for arena_name in sorted(self.games_by_arena.keys()):
                 arena_games = self.games_by_arena[arena_name]
                 dummy_wins = self.dummy_first_places_by_arena.get(arena_name, 0)
                 dummy_rate = (dummy_wins / arena_games) * 100.0 if arena_games > 0 else 0.0
                 print(f"{arena_name}: {dummy_wins}/{arena_games} ({dummy_rate:.1f}%).")
         if self.dummy_losses_to:
-            print("DummyBot losses to:")
+            print(f"{self.focus_controller_name} losses to:")
             for controller_name, losses_no in sorted(self.dummy_losses_to.items(), key=lambda item: item[1], reverse=True):
                 print(f"{controller_name}: {losses_no}.")
         if self.controller_praise_exceptions:

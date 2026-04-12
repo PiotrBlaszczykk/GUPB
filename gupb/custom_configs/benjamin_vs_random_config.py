@@ -1,6 +1,4 @@
-from gupb.controller import agressive_bot
-from gupb.controller import coward_bot
-from gupb.controller import dummy_bot
+from gupb.controller import benjamin_netanyahu
 from gupb.controller import random
 
 CONFIGURATION = {
@@ -11,17 +9,17 @@ CONFIGURATION = {
         "lone_sanctum",
     ],
     "controllers": [
-        dummy_bot.DummyBot("DummyBot"),
-        agressive_bot.AgressiveBot("AgressiveBot"),
-        coward_bot.CowardBot("CowardBot"),
+        benjamin_netanyahu.BenjaminNetanyahu("BenjaminNetanyahu"),
         random.RandomController("Alice"),
         random.RandomController("Bob"),
         random.RandomController("Cecilia"),
+        random.RandomController("Darius"),
     ],
     "start_balancing": True,
     "visualise": False,
     "show_sight": False,
     "parallel_processes": 8,
-    "runs_no": 1000,
+    "focus_controller_name": "BenjaminNetanyahu",
+    "runs_no": 400,
     "profiling_metrics": [],
 }
