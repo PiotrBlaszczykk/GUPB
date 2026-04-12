@@ -7,6 +7,8 @@ from gupb.model import characters
 from gupb.model import coordinates
 from gupb.model import tiles
 
+from .shared_state import BenjaminSharedState
+
 CRITICAL_HP = 3
 SAFE_MENHIR_RADIUS = 2
 ENDGAME_SWITCH_ALIVE = 4
@@ -15,119 +17,120 @@ ENDGAME_MIN_HP = 2
 
 class BenjaminPassiveMode(BenjaminNormalMode):
     """
-    Coward variant of DummyBot.
+    Coward mode.
     Prefers hiding, retreating, and surviving over fighting.
     """
 
-    def __init__(self, bot_name: str = "BenjaminPassiveMode"):
-        super().__init__(bot_name)
+    def __init__(
+            self,
+            bot_name: str = "BenjaminPassiveMode",
+            shared_state: Optional[BenjaminSharedState] = None,
+            allow_oracle_menhir: bool = False,
+    ):
+        super().__init__(
+            bot_name=bot_name,
+            shared_state=shared_state,
+            allow_oracle_menhir=allow_oracle_menhir,
+        )
 
     def decide(self, knowledge: characters.ChampionKnowledge) -> characters.Action:
-        knowledge = self._normalise_knowledge(knowledge)
-        self._turn_no += 1
-        self._update_failed_moves(knowledge.position)
-        self._update_world_memory(knowledge)
-        self._update_oracle_menhir()
-        self._visited_count[knowledge.position] += 1
-
-        current_tile = knowledge.visible_tiles.get(knowledge.position)
-        current_champion = current_tile.character if current_tile else None
-        facing = current_champion.facing if current_champion else characters.Facing.UP
-        current_weapon = current_champion.weapon.name if current_champion else "knife"
-        current_hp = current_champion.health if current_champion else characters.CHAMPION_STARTING_HP
-        self._update_damage_state(current_hp)
-
-        visible_enemy_positions = self._enemy_positions(knowledge, include_memory=False)
-        enemy_positions = self._enemy_positions(knowledge, include_memory=True)
-        mist_positions = self._mist_positions(knowledge)
-        mist_visible = bool(mist_positions)
+        context = self.observe_turn(knowledge)
 
         if self._failed_moves >= 2:
-            return self._store_action(characters.Action.TURN_RIGHT, knowledge.position)
+            return self._store_action(characters.Action.TURN_RIGHT, context.knowledge.position)
 
-        if current_tile and self._is_hazardous(current_tile):
-            emergency_target = self._known_menhir or self._estimated_center(knowledge.position)
-            escape_action = self._best_escape_step(knowledge, facing, emergency_target)
+        if context.current_tile and self._is_hazardous(context.current_tile):
+            emergency_target = self._known_menhir or self._estimated_center(context.knowledge.position)
+            escape_action = self._best_escape_step(context.knowledge, context.facing, emergency_target)
             if escape_action is not None:
-                return self._store_action(escape_action, knowledge.position)
-            return self._store_action(characters.Action.TURN_RIGHT, knowledge.position)
+                return self._store_action(escape_action, context.knowledge.position)
+            return self._store_action(characters.Action.TURN_RIGHT, context.knowledge.position)
 
-        if self._in_endgame_mode(knowledge, current_hp, mist_visible):
+        if self._in_endgame_mode(context.knowledge, context.current_hp, context.mist_visible):
             endgame_action = self._endgame_action(
-                knowledge=knowledge,
-                facing=facing,
-                current_hp=current_hp,
-                current_weapon=current_weapon,
-                visible_enemy_positions=visible_enemy_positions,
-                enemy_positions=enemy_positions,
-                mist_visible=mist_visible,
-                mist_positions=mist_positions,
+                knowledge=context.knowledge,
+                facing=context.facing,
+                current_hp=context.current_hp,
+                current_weapon=context.current_weapon,
+                visible_enemy_positions=context.visible_enemy_positions,
+                enemy_positions=context.enemy_positions,
+                mist_visible=context.mist_visible,
+                mist_positions=context.mist_positions,
             )
             if endgame_action is not None:
-                return self._store_action(endgame_action, knowledge.position)
+                return self._store_action(endgame_action, context.knowledge.position)
 
         # Primary behaviour: avoid fight when possible.
-        if visible_enemy_positions:
+        if context.visible_enemy_positions:
             retreat_action = self._retreat_from_enemy(
-                knowledge=knowledge,
-                facing=facing,
-                enemy_positions=visible_enemy_positions,
+                knowledge=context.knowledge,
+                facing=context.facing,
+                enemy_positions=context.visible_enemy_positions,
                 prefer_forest=True,
             )
             if retreat_action is not None:
-                return self._store_action(retreat_action, knowledge.position)
+                return self._store_action(retreat_action, context.knowledge.position)
 
             # If trapped in melee with no retreat, defend.
-            adjacent_enemy = self._nearest_adjacent_enemy(knowledge.position, visible_enemy_positions)
+            adjacent_enemy = self._nearest_adjacent_enemy(context.knowledge.position, context.visible_enemy_positions)
             if adjacent_enemy is not None:
-                face_action = self._face_target_action(knowledge.position, facing, adjacent_enemy)
+                face_action = self._face_target_action(context.knowledge.position, context.facing, adjacent_enemy)
                 if face_action is None:
-                    return self._store_action(characters.Action.ATTACK, knowledge.position)
-                return self._store_action(face_action, knowledge.position)
+                    return self._store_action(characters.Action.ATTACK, context.knowledge.position)
+                return self._store_action(face_action, context.knowledge.position)
 
-        if self._known_menhir is not None and self._should_prioritise_menhir(knowledge, current_hp, mist_positions):
+        if self._known_menhir is not None and self._should_prioritise_menhir(
+            context.knowledge,
+            context.current_hp,
+            context.mist_positions,
+        ):
             menhir_action = self._coward_menhir_action(
-                knowledge=knowledge,
-                facing=facing,
-                current_hp=current_hp,
-                visible_enemy_positions=visible_enemy_positions,
-                mist_visible=mist_visible,
-                current_weapon=current_weapon,
+                knowledge=context.knowledge,
+                facing=context.facing,
+                current_hp=context.current_hp,
+                visible_enemy_positions=context.visible_enemy_positions,
+                mist_visible=context.mist_visible,
+                current_weapon=context.current_weapon,
             )
             if menhir_action is not None:
-                return self._store_action(menhir_action, knowledge.position)
+                return self._store_action(menhir_action, context.knowledge.position)
 
-        target = self._choose_resource_target(knowledge, current_hp, current_weapon, mist_visible)
+        target = self._choose_resource_target(
+            context.knowledge,
+            context.current_hp,
+            context.current_weapon,
+            context.mist_visible,
+        )
         if target is not None:
             move_action = self._move_towards(
-                knowledge=knowledge,
-                facing=facing,
+                knowledge=context.knowledge,
+                facing=context.facing,
                 target=target,
                 target_is_enemy=False,
                 allow_hazard_path=False,
             )
             if move_action is not None:
-                return self._store_action(move_action, knowledge.position)
+                return self._store_action(move_action, context.knowledge.position)
 
-        hide_target = self._choose_hide_target(knowledge, enemy_positions)
+        hide_target = self._choose_hide_target(context.knowledge, context.enemy_positions)
         if hide_target is not None:
-            if hide_target == knowledge.position:
+            if hide_target == context.knowledge.position:
                 return self._store_action(
-                    self._hold_position_action(facing, visible_enemy_positions, knowledge.position),
-                    knowledge.position,
+                    self._hold_position_action(context.facing, context.visible_enemy_positions, context.knowledge.position),
+                    context.knowledge.position,
                 )
             hide_action = self._move_towards(
-                knowledge=knowledge,
-                facing=facing,
+                knowledge=context.knowledge,
+                facing=context.facing,
                 target=hide_target,
                 target_is_enemy=False,
                 allow_hazard_path=False,
             )
             if hide_action is not None:
-                return self._store_action(hide_action, knowledge.position)
+                return self._store_action(hide_action, context.knowledge.position)
 
-        explore_action = self._explore_action(knowledge, facing)
-        return self._store_action(explore_action, knowledge.position)
+        explore_action = self._explore_action(context.knowledge, context.facing)
+        return self._store_action(explore_action, context.knowledge.position)
 
     @staticmethod
     def _in_endgame_mode(
@@ -529,4 +532,3 @@ class BenjaminPassiveMode(BenjaminNormalMode):
     @property
     def preferred_tabard(self) -> characters.Tabard:
         return characters.Tabard.BENJAMIN_NETANYAHU
-

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import deque
 import inspect
 from typing import Optional
 
@@ -9,6 +9,9 @@ from gupb.model import arenas
 from gupb.model import characters
 from gupb.model import coordinates
 from gupb.model import tiles
+
+from .shared_state import BenjaminSharedState
+from .shared_state import TurnContext
 
 PASSABLE_TILE_TYPES = {"land", "forest", "menhir"}
 TRANSPARENT_TILE_TYPES = {"land", "sea", "menhir"}
@@ -48,33 +51,22 @@ PANIC_TURNS = 3
 
 class BenjaminNormalMode(controller.Controller):
     """
-    Heuristic baseline bot:
+    Heuristic baseline:
     - avoids hazards (fire/mist),
     - takes direct fights with visible enemies,
     - picks potion on low HP and upgrades weapon when reasonable,
     - uses simple BFS on visible passable tiles to avoid spinning in place.
     """
 
-    def __init__(self, bot_name: str = "BenjaminNormalMode"):
+    def __init__(
+            self,
+            bot_name: str = "BenjaminNormalMode",
+            shared_state: Optional[BenjaminSharedState] = None,
+            allow_oracle_menhir: bool = False,
+    ):
         self.bot_name: str = bot_name
-        self._last_position: Optional[coordinates.Coords] = None
-        self._last_action: characters.Action = characters.Action.DO_NOTHING
-        self._failed_moves: int = 0
-        self._recent_positions: deque[coordinates.Coords] = deque(maxlen=12)
-        self._known_menhir: Optional[coordinates.Coords] = None
-        self._arena_name: Optional[str] = None
-        self._seen_min_x: Optional[int] = None
-        self._seen_max_x: Optional[int] = None
-        self._seen_min_y: Optional[int] = None
-        self._seen_max_y: Optional[int] = None
-        self._known_passable: set[coordinates.Coords] = set()
-        self._known_blocked: set[coordinates.Coords] = set()
-        self._visited_count: dict[coordinates.Coords, int] = defaultdict(int)
-        self._enemy_memory: dict[str, tuple[coordinates.Coords, int]] = {}
-        self._turn_no: int = 0
-        self._last_hp: Optional[int] = None
-        self._recent_damage: deque[int] = deque(maxlen=4)
-        self._panic_turns: int = 0
+        self.shared_state: BenjaminSharedState = shared_state or BenjaminSharedState()
+        self._allow_oracle_menhir = allow_oracle_menhir
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, BenjaminNormalMode):
@@ -84,7 +76,232 @@ class BenjaminNormalMode(controller.Controller):
     def __hash__(self) -> int:
         return hash(self.bot_name)
 
+    @property
+    def _last_position(self) -> Optional[coordinates.Coords]:
+        return self.shared_state.last_position
+
+    @_last_position.setter
+    def _last_position(self, value: Optional[coordinates.Coords]) -> None:
+        self.shared_state.last_position = value
+
+    @property
+    def _last_action(self) -> characters.Action:
+        return self.shared_state.last_action
+
+    @_last_action.setter
+    def _last_action(self, value: characters.Action) -> None:
+        self.shared_state.last_action = value
+
+    @property
+    def _failed_moves(self) -> int:
+        return self.shared_state.failed_moves
+
+    @_failed_moves.setter
+    def _failed_moves(self, value: int) -> None:
+        self.shared_state.failed_moves = value
+
+    @property
+    def _recent_positions(self) -> deque[coordinates.Coords]:
+        return self.shared_state.recent_positions
+
+    @_recent_positions.setter
+    def _recent_positions(self, value: deque[coordinates.Coords]) -> None:
+        self.shared_state.recent_positions = value
+
+    @property
+    def _known_menhir(self) -> Optional[coordinates.Coords]:
+        return self.shared_state.known_menhir
+
+    @_known_menhir.setter
+    def _known_menhir(self, value: Optional[coordinates.Coords]) -> None:
+        self.shared_state.known_menhir = value
+
+    @property
+    def _arena_name(self) -> Optional[str]:
+        return self.shared_state.arena_name
+
+    @_arena_name.setter
+    def _arena_name(self, value: Optional[str]) -> None:
+        self.shared_state.arena_name = value
+
+    @property
+    def _seen_min_x(self) -> Optional[int]:
+        return self.shared_state.seen_min_x
+
+    @_seen_min_x.setter
+    def _seen_min_x(self, value: Optional[int]) -> None:
+        self.shared_state.seen_min_x = value
+
+    @property
+    def _seen_max_x(self) -> Optional[int]:
+        return self.shared_state.seen_max_x
+
+    @_seen_max_x.setter
+    def _seen_max_x(self, value: Optional[int]) -> None:
+        self.shared_state.seen_max_x = value
+
+    @property
+    def _seen_min_y(self) -> Optional[int]:
+        return self.shared_state.seen_min_y
+
+    @_seen_min_y.setter
+    def _seen_min_y(self, value: Optional[int]) -> None:
+        self.shared_state.seen_min_y = value
+
+    @property
+    def _seen_max_y(self) -> Optional[int]:
+        return self.shared_state.seen_max_y
+
+    @_seen_max_y.setter
+    def _seen_max_y(self, value: Optional[int]) -> None:
+        self.shared_state.seen_max_y = value
+
+    @property
+    def _known_passable(self) -> set[coordinates.Coords]:
+        return self.shared_state.known_passable
+
+    @_known_passable.setter
+    def _known_passable(self, value: set[coordinates.Coords]) -> None:
+        self.shared_state.known_passable = value
+
+    @property
+    def _known_blocked(self) -> set[coordinates.Coords]:
+        return self.shared_state.known_blocked
+
+    @_known_blocked.setter
+    def _known_blocked(self, value: set[coordinates.Coords]) -> None:
+        self.shared_state.known_blocked = value
+
+    @property
+    def _visited_count(self) -> dict[coordinates.Coords, int]:
+        return self.shared_state.visited_count
+
+    @_visited_count.setter
+    def _visited_count(self, value: dict[coordinates.Coords, int]) -> None:
+        self.shared_state.visited_count = value
+
+    @property
+    def _enemy_memory(self) -> dict[str, tuple[coordinates.Coords, int]]:
+        return self.shared_state.enemy_memory
+
+    @_enemy_memory.setter
+    def _enemy_memory(self, value: dict[str, tuple[coordinates.Coords, int]]) -> None:
+        self.shared_state.enemy_memory = value
+
+    @property
+    def _turn_no(self) -> int:
+        return self.shared_state.turn_no
+
+    @_turn_no.setter
+    def _turn_no(self, value: int) -> None:
+        self.shared_state.turn_no = value
+
+    @property
+    def _last_hp(self) -> Optional[int]:
+        return self.shared_state.last_hp
+
+    @_last_hp.setter
+    def _last_hp(self, value: Optional[int]) -> None:
+        self.shared_state.last_hp = value
+
+    @property
+    def _recent_damage(self) -> deque[int]:
+        return self.shared_state.recent_damage
+
+    @_recent_damage.setter
+    def _recent_damage(self, value: deque[int]) -> None:
+        self.shared_state.recent_damage = value
+
+    @property
+    def _panic_turns(self) -> int:
+        return self.shared_state.panic_turns
+
+    @_panic_turns.setter
+    def _panic_turns(self, value: int) -> None:
+        self.shared_state.panic_turns = value
+
     def decide(self, knowledge: characters.ChampionKnowledge) -> characters.Action:
+        context = self.observe_turn(knowledge)
+
+        if self._failed_moves >= 2:
+            return self._store_action(characters.Action.TURN_RIGHT, context.knowledge.position)
+
+        if context.current_tile and self._is_hazardous(context.current_tile):
+            emergency_target = self._known_menhir or self._estimated_center(context.knowledge.position)
+            escape_action = self._best_escape_step(context.knowledge, context.facing, emergency_target)
+            if escape_action is not None:
+                return self._store_action(escape_action, context.knowledge.position)
+            return self._store_action(characters.Action.TURN_RIGHT, context.knowledge.position)
+
+        adjacent_enemy = self._nearest_adjacent_enemy(context.knowledge.position, context.visible_enemy_positions)
+        if adjacent_enemy is not None:
+            face_action = self._face_target_action(context.knowledge.position, context.facing, adjacent_enemy)
+            if face_action is None:
+                return self._store_action(characters.Action.ATTACK, context.knowledge.position)
+            return self._store_action(face_action, context.knowledge.position)
+
+        if context.visible_enemy_positions and self._enemy_in_range(
+            context.knowledge,
+            context.facing,
+            context.current_weapon,
+            context.visible_enemy_positions,
+        ):
+            return self._store_action(characters.Action.ATTACK, context.knowledge.position)
+
+        if self._known_menhir is not None and self._should_prioritise_menhir(
+            context.knowledge,
+            context.current_hp,
+            context.mist_positions,
+        ):
+            menhir_action = self._menhir_mode_action(
+                knowledge=context.knowledge,
+                facing=context.facing,
+                current_hp=context.current_hp,
+                current_weapon=context.current_weapon,
+                visible_enemy_positions=context.visible_enemy_positions,
+                enemy_positions=context.enemy_positions,
+                mist_visible=context.mist_visible,
+            )
+            if menhir_action is not None:
+                return self._store_action(menhir_action, context.knowledge.position)
+
+        if context.enemy_positions and self._should_chase_enemy(
+            knowledge=context.knowledge,
+            current_hp=context.current_hp,
+            current_weapon=context.current_weapon,
+            enemy_positions=context.enemy_positions,
+            mist_visible=context.mist_visible,
+        ):
+            chase_action = self._move_towards_enemy(
+                context.knowledge,
+                context.facing,
+                context.enemy_positions,
+                context.current_weapon,
+            )
+            if chase_action is not None:
+                return self._store_action(chase_action, context.knowledge.position)
+
+        target = self._choose_resource_target(
+            context.knowledge,
+            context.current_hp,
+            context.current_weapon,
+            context.mist_visible,
+        )
+        if target is not None:
+            move_action = self._move_towards(
+                context.knowledge,
+                context.facing,
+                target,
+                target_is_enemy=False,
+                allow_hazard_path=False,
+            )
+            if move_action is not None:
+                return self._store_action(move_action, context.knowledge.position)
+
+        explore_action = self._explore_action(context.knowledge, context.facing)
+        return self._store_action(explore_action, context.knowledge.position)
+
+    def observe_turn(self, knowledge: characters.ChampionKnowledge) -> TurnContext:
         knowledge = self._normalise_knowledge(knowledge)
         self._turn_no += 1
         self._update_failed_moves(knowledge.position)
@@ -98,69 +315,22 @@ class BenjaminNormalMode(controller.Controller):
         current_weapon = current_champion.weapon.name if current_champion else "knife"
         current_hp = current_champion.health if current_champion else characters.CHAMPION_STARTING_HP
         self._update_damage_state(current_hp)
+
         visible_enemy_positions = self._enemy_positions(knowledge, include_memory=False)
         enemy_positions = self._enemy_positions(knowledge, include_memory=True)
         mist_positions = self._mist_positions(knowledge)
-        mist_visible = bool(mist_positions)
 
-        if self._failed_moves >= 2:
-            return self._store_action(characters.Action.TURN_RIGHT, knowledge.position)
-
-        if current_tile and self._is_hazardous(current_tile):
-            emergency_target = self._known_menhir or self._estimated_center(knowledge.position)
-            escape_action = self._best_escape_step(knowledge, facing, emergency_target)
-            if escape_action is not None:
-                return self._store_action(escape_action, knowledge.position)
-            return self._store_action(characters.Action.TURN_RIGHT, knowledge.position)
-
-        adjacent_enemy = self._nearest_adjacent_enemy(knowledge.position, visible_enemy_positions)
-        if adjacent_enemy is not None:
-            face_action = self._face_target_action(knowledge.position, facing, adjacent_enemy)
-            if face_action is None:
-                return self._store_action(characters.Action.ATTACK, knowledge.position)
-            return self._store_action(face_action, knowledge.position)
-
-        if visible_enemy_positions and self._enemy_in_range(knowledge, facing, current_weapon, visible_enemy_positions):
-            return self._store_action(characters.Action.ATTACK, knowledge.position)
-
-        if self._known_menhir is not None and self._should_prioritise_menhir(knowledge, current_hp, mist_positions):
-            menhir_action = self._menhir_mode_action(
-                knowledge=knowledge,
-                facing=facing,
-                current_hp=current_hp,
-                current_weapon=current_weapon,
-                visible_enemy_positions=visible_enemy_positions,
-                enemy_positions=enemy_positions,
-                mist_visible=mist_visible,
-            )
-            if menhir_action is not None:
-                return self._store_action(menhir_action, knowledge.position)
-
-        if enemy_positions and self._should_chase_enemy(
+        return TurnContext(
             knowledge=knowledge,
-            current_hp=current_hp,
+            current_tile=current_tile,
+            facing=facing,
             current_weapon=current_weapon,
+            current_hp=current_hp,
+            visible_enemy_positions=visible_enemy_positions,
             enemy_positions=enemy_positions,
-            mist_visible=mist_visible,
-        ):
-            chase_action = self._move_towards_enemy(knowledge, facing, enemy_positions, current_weapon)
-            if chase_action is not None:
-                return self._store_action(chase_action, knowledge.position)
-
-        target = self._choose_resource_target(knowledge, current_hp, current_weapon, mist_visible)
-        if target is not None:
-            move_action = self._move_towards(
-                knowledge,
-                facing,
-                target,
-                target_is_enemy=False,
-                allow_hazard_path=False,
-            )
-            if move_action is not None:
-                return self._store_action(move_action, knowledge.position)
-
-        explore_action = self._explore_action(knowledge, facing)
-        return self._store_action(explore_action, knowledge.position)
+            mist_positions=mist_positions,
+            mist_visible=bool(mist_positions),
+        )
 
     def _normalise_knowledge(self, knowledge: characters.ChampionKnowledge) -> characters.ChampionKnowledge:
         normalised_visible_tiles = {
@@ -492,6 +662,8 @@ class BenjaminNormalMode(controller.Controller):
         return mist_tiles
 
     def _update_oracle_menhir(self) -> None:
+        if not self._allow_oracle_menhir:
+            return
         if self._known_menhir is not None:
             return
         frame = inspect.currentframe()
@@ -1040,4 +1212,3 @@ class BenjaminNormalMode(controller.Controller):
     @property
     def preferred_tabard(self) -> characters.Tabard:
         return characters.Tabard.BENJAMIN_NETANYAHU
-

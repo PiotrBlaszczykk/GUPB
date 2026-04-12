@@ -7,108 +7,122 @@ from gupb.model import characters
 from gupb.model import coordinates
 from gupb.model import tiles
 
+from .shared_state import BenjaminSharedState
+
 
 class BenjaminAggressiveMode(BenjaminNormalMode):
     """
-    Aggressive variant of DummyBot.
-    Prioritises chase/fights much harder while keeping enough survival logic
+    Aggressive mode.
+    Prioritizes chase/fights much harder while keeping enough survival logic
     to avoid instantly feeding in mist.
     """
 
-    def __init__(self, bot_name: str = "BenjaminAggressiveMode"):
-        super().__init__(bot_name)
+    def __init__(
+            self,
+            bot_name: str = "BenjaminAggressiveMode",
+            shared_state: Optional[BenjaminSharedState] = None,
+            allow_oracle_menhir: bool = False,
+    ):
+        super().__init__(
+            bot_name=bot_name,
+            shared_state=shared_state,
+            allow_oracle_menhir=allow_oracle_menhir,
+        )
 
     def decide(self, knowledge: characters.ChampionKnowledge) -> characters.Action:
-        knowledge = self._normalise_knowledge(knowledge)
-        self._turn_no += 1
-        self._update_failed_moves(knowledge.position)
-        self._update_world_memory(knowledge)
-        self._update_oracle_menhir()
-        self._visited_count[knowledge.position] += 1
-
-        current_tile = knowledge.visible_tiles.get(knowledge.position)
-        current_champion = current_tile.character if current_tile else None
-        facing = current_champion.facing if current_champion else characters.Facing.UP
-        current_weapon = current_champion.weapon.name if current_champion else "knife"
-        current_hp = current_champion.health if current_champion else characters.CHAMPION_STARTING_HP
-        self._update_damage_state(current_hp)
-        visible_enemy_positions = self._enemy_positions(knowledge, include_memory=False)
-        enemy_positions = self._enemy_positions(knowledge, include_memory=True)
-        mist_positions = self._mist_positions(knowledge)
-        mist_visible = bool(mist_positions)
+        context = self.observe_turn(knowledge)
 
         if self._failed_moves >= 2:
-            return self._store_action(characters.Action.TURN_RIGHT, knowledge.position)
+            return self._store_action(characters.Action.TURN_RIGHT, context.knowledge.position)
 
-        if current_tile and self._is_hazardous(current_tile):
-            emergency_target = self._known_menhir or self._estimated_center(knowledge.position)
-            escape_action = self._best_escape_step(knowledge, facing, emergency_target)
+        if context.current_tile and self._is_hazardous(context.current_tile):
+            emergency_target = self._known_menhir or self._estimated_center(context.knowledge.position)
+            escape_action = self._best_escape_step(context.knowledge, context.facing, emergency_target)
             if escape_action is not None:
-                return self._store_action(escape_action, knowledge.position)
-            return self._store_action(characters.Action.TURN_RIGHT, knowledge.position)
+                return self._store_action(escape_action, context.knowledge.position)
+            return self._store_action(characters.Action.TURN_RIGHT, context.knowledge.position)
 
-        adjacent_enemy = self._nearest_adjacent_enemy(knowledge.position, visible_enemy_positions)
+        adjacent_enemy = self._nearest_adjacent_enemy(context.knowledge.position, context.visible_enemy_positions)
         if adjacent_enemy is not None:
-            face_action = self._face_target_action(knowledge.position, facing, adjacent_enemy)
+            face_action = self._face_target_action(context.knowledge.position, context.facing, adjacent_enemy)
             if face_action is None:
-                return self._store_action(characters.Action.ATTACK, knowledge.position)
-            return self._store_action(face_action, knowledge.position)
+                return self._store_action(characters.Action.ATTACK, context.knowledge.position)
+            return self._store_action(face_action, context.knowledge.position)
 
-        if visible_enemy_positions and self._enemy_in_range(knowledge, facing, current_weapon, visible_enemy_positions):
-            return self._store_action(characters.Action.ATTACK, knowledge.position)
+        if context.visible_enemy_positions and self._enemy_in_range(
+            context.knowledge,
+            context.facing,
+            context.current_weapon,
+            context.visible_enemy_positions,
+        ):
+            return self._store_action(characters.Action.ATTACK, context.knowledge.position)
 
         # Aggressive priority: chase whenever it is not clearly suicidal.
-        if enemy_positions and self._should_chase_enemy(
-            knowledge=knowledge,
-            current_hp=current_hp,
-            current_weapon=current_weapon,
-            enemy_positions=enemy_positions,
-            mist_visible=mist_visible,
+        if context.enemy_positions and self._should_chase_enemy(
+            knowledge=context.knowledge,
+            current_hp=context.current_hp,
+            current_weapon=context.current_weapon,
+            enemy_positions=context.enemy_positions,
+            mist_visible=context.mist_visible,
         ):
-            chase_action = self._move_towards_enemy(knowledge, facing, enemy_positions, current_weapon)
+            chase_action = self._move_towards_enemy(
+                context.knowledge,
+                context.facing,
+                context.enemy_positions,
+                context.current_weapon,
+            )
             if chase_action is not None:
-                return self._store_action(chase_action, knowledge.position)
+                return self._store_action(chase_action, context.knowledge.position)
 
-        if self._known_menhir is not None and self._should_prioritise_menhir(knowledge, current_hp, mist_positions):
+        if self._known_menhir is not None and self._should_prioritise_menhir(
+            context.knowledge,
+            context.current_hp,
+            context.mist_positions,
+        ):
             menhir_action = self._menhir_mode_action(
-                knowledge=knowledge,
-                facing=facing,
-                current_hp=current_hp,
-                current_weapon=current_weapon,
-                visible_enemy_positions=visible_enemy_positions,
-                enemy_positions=enemy_positions,
-                mist_visible=mist_visible,
+                knowledge=context.knowledge,
+                facing=context.facing,
+                current_hp=context.current_hp,
+                current_weapon=context.current_weapon,
+                visible_enemy_positions=context.visible_enemy_positions,
+                enemy_positions=context.enemy_positions,
+                mist_visible=context.mist_visible,
             )
             if menhir_action is not None:
-                return self._store_action(menhir_action, knowledge.position)
+                return self._store_action(menhir_action, context.knowledge.position)
 
-        target = self._choose_resource_target(knowledge, current_hp, current_weapon, mist_visible)
+        target = self._choose_resource_target(
+            context.knowledge,
+            context.current_hp,
+            context.current_weapon,
+            context.mist_visible,
+        )
         if target is not None:
             move_action = self._move_towards(
-                knowledge=knowledge,
-                facing=facing,
+                knowledge=context.knowledge,
+                facing=context.facing,
                 target=target,
                 target_is_enemy=False,
                 allow_hazard_path=False,
             )
             if move_action is not None:
-                return self._store_action(move_action, knowledge.position)
+                return self._store_action(move_action, context.knowledge.position)
 
         # If no direct plan, keep pressure by moving toward freshest remembered enemy.
-        memory_target = self._fresh_enemy_memory_target(knowledge.position)
+        memory_target = self._fresh_enemy_memory_target(context.knowledge.position)
         if memory_target is not None:
             memory_chase_action = self._move_towards(
-                knowledge=knowledge,
-                facing=facing,
+                knowledge=context.knowledge,
+                facing=context.facing,
                 target=memory_target,
                 target_is_enemy=False,
                 allow_hazard_path=False,
             )
             if memory_chase_action is not None:
-                return self._store_action(memory_chase_action, knowledge.position)
+                return self._store_action(memory_chase_action, context.knowledge.position)
 
-        explore_action = self._explore_action(knowledge, facing)
-        return self._store_action(explore_action, knowledge.position)
+        explore_action = self._explore_action(context.knowledge, context.facing)
+        return self._store_action(explore_action, context.knowledge.position)
 
     def _should_prioritise_menhir(
             self,
@@ -247,4 +261,3 @@ class BenjaminAggressiveMode(BenjaminNormalMode):
     @property
     def preferred_tabard(self) -> characters.Tabard:
         return characters.Tabard.BENJAMIN_NETANYAHU
-
