@@ -15,8 +15,12 @@ class AgressiveBot(DummyBot):
     to avoid instantly feeding in mist.
     """
 
-    def __init__(self, bot_name: str = "AgressiveBot"):
-        super().__init__(bot_name)
+    def __init__(
+            self,
+            bot_name: str = "AgressiveBot",
+            allow_oracle_menhir: bool = False,
+    ):
+        super().__init__(bot_name=bot_name, allow_oracle_menhir=allow_oracle_menhir)
 
     def decide(self, knowledge: characters.ChampionKnowledge) -> characters.Action:
         knowledge = self._normalise_knowledge(knowledge)

@@ -19,8 +19,12 @@ class CowardBot(DummyBot):
     Prefers hiding, retreating, and surviving over fighting.
     """
 
-    def __init__(self, bot_name: str = "CowardBot"):
-        super().__init__(bot_name)
+    def __init__(
+            self,
+            bot_name: str = "CowardBot",
+            allow_oracle_menhir: bool = False,
+    ):
+        super().__init__(bot_name=bot_name, allow_oracle_menhir=allow_oracle_menhir)
 
     def decide(self, knowledge: characters.ChampionKnowledge) -> characters.Action:
         knowledge = self._normalise_knowledge(knowledge)

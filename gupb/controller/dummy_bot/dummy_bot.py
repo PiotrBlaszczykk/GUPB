@@ -55,8 +55,13 @@ class DummyBot(controller.Controller):
     - uses simple BFS on visible passable tiles to avoid spinning in place.
     """
 
-    def __init__(self, bot_name: str = "DummyBot"):
+    def __init__(
+            self,
+            bot_name: str = "DummyBot",
+            allow_oracle_menhir: bool = False,
+    ):
         self.bot_name: str = bot_name
+        self._allow_oracle_menhir: bool = bool(allow_oracle_menhir)
         self._last_position: Optional[coordinates.Coords] = None
         self._last_action: characters.Action = characters.Action.DO_NOTHING
         self._failed_moves: int = 0
@@ -492,6 +497,8 @@ class DummyBot(controller.Controller):
         return mist_tiles
 
     def _update_oracle_menhir(self) -> None:
+        if not self._allow_oracle_menhir:
+            return
         if self._known_menhir is not None:
             return
         frame = inspect.currentframe()

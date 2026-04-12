@@ -9,7 +9,11 @@ CONFIGURATION = {
         "lone_sanctum",
     ],
     "controllers": [
-        benjamin_netanyahu.BenjaminNetanyahu("BenjaminNetanyahu"),
+        benjamin_netanyahu.BenjaminNetanyahu(
+            "BenjaminNetanyahu",
+            mode_horizon_turns=3,
+            allow_oracle_menhir=False,
+        ),
         random.RandomController("Alice"),
         random.RandomController("Bob"),
         random.RandomController("Cecilia"),
