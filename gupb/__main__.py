@@ -15,7 +15,6 @@ import click
 import questionary
 
 from gupb import controller
-from gupb import runner
 
 # noinspection PyUnresolvedReferences
 @lru_cache()
@@ -174,10 +173,21 @@ def configure_logging(log_directory: str) -> None:
 @click.option('-l', '--log_directory', default='results',
               type=click.Path(exists=False), help="The path to log storage directory.")
 def main(config_path: str, inquiry: bool, log_directory: str) -> None:
+    from gupb import runner
+    from gupb import runner_parallel
+
     configure_logging(log_directory)
     current_config = load_initial_config(config_path)
     current_config = configuration_inquiry(current_config) if inquiry else current_config
-    game_runner = runner.Runner(current_config)
+    current_config['__config_path'] = os.path.abspath(config_path)
+    current_config['__inquiry'] = inquiry
+    parallel_processes = int(current_config.get('parallel_processes', 1))
+    use_parallel = (
+        parallel_processes > 1
+        and not current_config.get('visualise', False)
+        and not inquiry
+    )
+    game_runner = runner_parallel.RunnerParallel(current_config) if use_parallel else runner.Runner(current_config)
     game_runner.run()
     game_runner.print_scores()
 
