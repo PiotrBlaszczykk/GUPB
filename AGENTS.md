@@ -19,6 +19,12 @@ Uruchom z katalogu glownnego:
 
 Domyslnie uruchamiany jest config `gupb/default_config.py`.
 
+Przy uruchamianiu konkretnego scenariusza uzyj:
+
+```powershell
+.\.venv\Scripts\python.exe -m gupb -c gupb/custom_configs/mixed_bots_parallel_config.py
+```
+
 ## 3. Struktura repo
 
 - `README.md`: podstawowe informacje.
@@ -36,19 +42,26 @@ Najwazniejsze moduly w `gupb/`:
 - `__init__.py`: event loop i env vars.
 - `__main__.py`: CLI, ladowanie configu, inquiry, logowanie.
 - `runner.py`: uruchamianie serii gier i ranking.
+- `runner_parallel.py`: odpalanie gier rownolegle (spawn/process pool) + dodatkowa observability.
 - `model/`: cala logika gry.
 - `view/render.py`: wizualizacja Pygame.
 - `controller/`: boty i sterowanie reczne.
 - `scripts/`: generator map i parser wynikow.
+- `custom_configs/`: nasze niestandardowe konfiguracje symulacji.
 
 ## 4. Przeplyw wykonania
 
 1. `python -m gupb` uruchamia `gupb.__main__.main`.
 2. Ladowany jest `CONFIGURATION` z pliku config.
-3. Tworzony jest `Runner(config)`.
+3. Na podstawie configu wybierany jest runner:
+   - `RunnerParallel(config)`, gdy `parallel_processes > 1`, `visualise=False`, `inquiry=False`,
+   - inaczej `Runner(config)`.
 4. `Runner.run()` odpala `runs_no` gier.
 5. Kazda gra to `Game` (state machine).
 6. Na koncu `Runner.print_scores()` drukuje wyniki.
+
+Wazne: wybor runnera nie jest "na sztywno" w configu.
+Config podaje flagi (`parallel_processes`, `visualise`, `inquiry`), a decyzje podejmuje `gupb/__main__.py`.
 
 ## 5. Cykl gry (Game state machine)
 
@@ -277,14 +290,27 @@ Jezeli jakis modul nie importuje sie poprawnie, discovery moze sie wysypac.
 
 ## 16. Stan botow w aktualnym repo
 
-- Dzialaja:
+- Dzialaja i sa aktywnie rozwijane:
+  - `DummyBot` (`gupb/controller/dummy_bot/dummy_bot.py`) - solidny baseline heurystyczny.
+  - `AgressiveBot` (`gupb/controller/agressive_bot/agressive_bot.py`) - wariant ofensywny.
+  - `CowardBot` (`gupb/controller/coward_bot/coward_bot.py`) - wariant defensywny/camp.
   - `RandomController`
   - `KeyboardController`
-- Placeholdery (stala akcja):
-  - `BenjaminNetanyahu`, `Bob`, `BladeRunner`, `SyntaxTerror`, `Pudzian`
-- `JeffreyE`, `Karakin`: stale `ATTACK`
-- `BIGbot`: parser obserwacji + stub, aktualnie `DO_NOTHING`
-- `BiwakSpot`, `TheTrooper`: `NotImplementedError` w kluczowych metodach
+- Pozostale kontrolery sa glownie eksperymentalne albo placeholderowe (warto sprawdzic kod przed uzyciem turniejowym).
+
+### 16.1 Charakterystyka naszych 3 botow treningowych
+
+- `DummyBot`:
+  - pamiec mapy (`known_passable`, `known_blocked`, `visited_count`),
+  - pamiec ostatnio widzianych przeciwnikow (TTL),
+  - hazard avoidance, menhir mode, weapon-aware engage goals,
+  - sluzy jako "balanced sparring baseline".
+- `AgressiveBot`:
+  - mocniej goni przeciwnikow i preferuje inicjacje walk,
+  - ogranicza tylko ewidentnie samobojcze chase w mgle/na niskim HP.
+- `CowardBot`:
+  - unika walki, preferuje cover/forest i bezpieczne pozycje przy menhirze,
+  - ma endgame switch, zeby domykac koncowki zamiast tylko przezywac.
 
 ## 17. Sterowanie reczne (KeyboardController)
 
@@ -301,6 +327,27 @@ Logi:
 - `verbose` -> plik `.log`
 - `json` -> plik `.json` eventow
 
+### 18.1 Dodatkowe eventy w runnerze rownoleglym
+
+W `runner_parallel.py` dochodza eventy:
+
+- `ParallelChunkSubmittedReport`
+- `ParallelChunkFinishedReport`
+- `ParallelChunkFailedReport`
+- `ParallelGameSummaryReport`
+- `ParallelGameFailedReport`
+- `ParallelRunSummaryReport`
+
+Kazdy `ParallelGameSummaryReport` ma m.in.:
+
+- `arena_name`, `episodes`, `winner_name`
+- `scores` (punkty wszystkich kontrolerow)
+- `mist_radius_end`, `menhir_x`, `menhir_y`
+
+Uwaga: nazwy pol `dummy_*` w logu i czesc napisow w `print_scores()` sa historyczne
+(nadal maja "dummy" w nazwie), nawet gdy testujesz innego bota.
+To kwestia nazewnictwa observability, nie wynikow gry.
+
 Profilowanie:
 
 - dekorator `@profile` zapisuje czasy do `PROFILE_RESULTS`,
@@ -309,6 +356,8 @@ Profilowanie:
 ## 19. Wazne wskazowki dla LLM
 
 - Pilnuj zgodnosci z kontraktem `Controller`.
+- Na turniej nie modyfikuj silnika (`model/*`, `areas.py`, `games.py`) bez potrzeby.
+  Boty i eksperymenty trzymaj glownie w `controller/*` + configach.
 - Zmiany w walce zwykle dotykaja jednoczesnie:
   - `weapons.py`
   - `effects.py`
@@ -332,3 +381,137 @@ Profilowanie:
   - Mist: `1`
 - Bow: strzela co drugi atak
 - Scroll: 5 ladowan, naklada fire, niedropowalny
+
+## 21. Nasze custom configi (aktualny porzadek)
+
+Wszystkie niestandardowe configi trzymamy w `gupb/custom_configs/`:
+
+- `dummy_simulation_config.py`
+- `agressive_config.py`
+- `coward_config.py`
+- `mixed_bots_config.py` (sekwencyjny: `parallel_processes=1`)
+- `mixed_bots_parallel_config.py` (rownolegly: `parallel_processes=8`)
+- `together_config.py`
+
+Przyklady:
+
+```powershell
+# zwykly runner
+.\.venv\Scripts\python.exe -m gupb -c gupb/custom_configs/mixed_bots_config.py
+
+# runner rownolegly
+.\.venv\Scripts\python.exe -m gupb -c gupb/custom_configs/mixed_bots_parallel_config.py
+```
+
+## 22. Interpretacja wynikow konsolowych
+
+- Linie typu `1. BotName: 1234.` to suma punktow rankingowych z wielu gier.
+- `First-place rates` to rzeczywisty winrate (ile razy bot byl 1.).
+- Przy ocenie "kto dominuje" patrz najpierw na `First-place rates`, dopiero potem na punkty laczne.
+
+## 23. Heurystyczny decision stack (praktyka z 3 botow)
+
+Ponizszy porzadek decyzji okazal sie stabilny i przewidywalny:
+
+1. Anti-stuck / failed-move recovery.
+2. Natychmiastowe wyjscie z hazardu (`mist`/`fire`).
+3. Lokalny combat:
+   - adjacent enemy -> obrot i `ATTACK`,
+   - enemy in weapon range -> `ATTACK`.
+4. Menhir mode (gdy late-game/mist/niski HP).
+5. Chase (tylko gdy nie jest samobojczy wg progow HP/mist/dystans).
+6. Loot/potion target.
+7. Explore / anchor / hide.
+
+Warianty osobowosci:
+
+- `DummyBot`: balanced (czasem chase, czasem menhir, sensowny loot).
+- `AgressiveBot`: przesuwa priorytet na chase/fight.
+- `CowardBot`: przesuwa priorytet na retreat/hide/menhir hold, ale musi miec endgame switch.
+
+## 24. Weapon-aware zasady ruchu i walki
+
+Sprawdzone heurystyki pod aktualna mechanike:
+
+- `knife`:
+  - chcemy adjacency,
+  - nie chase'owac daleko na niskim HP.
+- `sword`:
+  - preferowac linie 1-3 pola,
+  - nie trzeba "wchodzic pod nos".
+- `axe`:
+  - walka frontowym 3-polem (left-front, front, right-front),
+  - dobra do presji w ciasnych strefach menhiru.
+- `bow`:
+  - dlugi zasieg, ale tryb ladowanie/strzal,
+  - w late game i blisko menhiru nie zawsze jest najlepszy.
+- `amulet`:
+  - atak po przekatnych (1 i 2),
+  - dodatkowo daje kolowa prescience.
+- `scroll`:
+  - strefowanie przez `fire`, ladunki ograniczone.
+
+## 25. Pamiec stanu (POMDP) - co trzymac w kontrolerze
+
+Minimalny sensowny zestaw:
+
+- `known_passable`, `known_blocked`,
+- `visited_count`,
+- `recent_positions` (anty-petla),
+- `enemy_memory` z TTL,
+- `known_menhir`,
+- `recent_damage` + `panic_turns`.
+
+Dlaczego to dziala:
+
+- bez pamieci bot wyglada "losowo",
+- z pamiecia robi stabilny pathfinding i mniej marnuje tur,
+- `panic_turns` broni przed glupim trade'em po naglym spike dmg.
+
+## 26. Antywzorce i regression checklist
+
+Rzeczy, ktore juz raz popsuly performance:
+
+- BFS first-step mapowany na obrot zamiast kroku:
+  - zly: `TURN_LEFT/RIGHT`,
+  - poprawny: `STEP_LEFT/RIGHT/BACKWARD`.
+- Retreat/hide reagujacy na "ghost enemy" z pamieci:
+  - defensywa powinna bazowac glownie na wrogach widocznych teraz.
+- Nadmiernie pasywny camper:
+  - przezywa dlugo, ale nie domyka gier (duzo 2-4 miejsca).
+- Dotykanie silnika gry pod turniej:
+  - unikac zmian w `areas.py`/`model/*` jesli celem jest bot turniejowy.
+
+## 27. Jak czytac logi pod tuning bota
+
+Najbardziej uzyteczne sygnaly:
+
+- `First-place rates`: glowny KPI.
+- Rank histogram (`scores[bot]`): czy bot "nie domyka" (duzo 2-4).
+- Arena breakdown: czy slabe mapy to open-space czy close-quarters.
+- `avg episodes` i `longest game`: czy bot gra "za dlugo" bez finalizacji.
+- `ParallelGameSummaryReport`:
+  - winner, arena, episodes, score map.
+
+Praktyczna petla strojenia:
+
+1. Uruchom 200-400 gier na parallel configu.
+2. Sprawdz per-arena WR i rozklad miejsc.
+3. Modyfikuj 1-2 progi naraz (HP, dystans chase, menhir radius).
+4. Powtorz run i porownaj tylko z poprzednim baseline.
+
+## 28. Uzycie 3 botow jako sparring pool pod RL
+
+Dobre role treningowe:
+
+- `CowardBot`: uczy domykania pozycyjnego i walki w koncowkach.
+- `DummyBot`: uczy gry z "normalnym" przeciwnikiem heurystycznym.
+- `AgressiveBot`: uczy reakcji na presje i anti-rush.
+
+Najprostszy curriculum:
+
+1. Start: wiecej `CowardBot` i `Random` (stabilizacja przezycia).
+2. Srodek: mix `DummyBot` + `Random`.
+3. Koniec: wiecej `AgressiveBot` + `DummyBot` (presja + domykanie).
+
+Wazne: trzymaj stale zasady silnika miedzy treningiem i ewaluacja.
