@@ -18,6 +18,22 @@ __all__ = [
     "POTENTIAL_CONTROLLERS",
 ]
 
-POTENTIAL_CONTROLLERS = [
-    BenjaminNetanyahu("Benjamin Netanyahu"),
-]
+
+def _build_default_controller():
+    if BenjaminNetanyahuDQN is not None:
+        try:
+            return BenjaminNetanyahuDQN(
+                "BenjaminNetanyahu",
+                mode_horizon_turns=3,
+                allow_oracle_menhir=False,
+            )
+        except Exception:
+            pass
+    return BenjaminNetanyahu(
+        "BenjaminNetanyahu",
+        mode_horizon_turns=3,
+        allow_oracle_menhir=False,
+    )
+
+
+POTENTIAL_CONTROLLERS = [_build_default_controller()]

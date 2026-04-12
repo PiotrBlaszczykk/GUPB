@@ -77,6 +77,10 @@ class BenjaminNetanyahu(controller.Controller):
     def current_mode_index(self) -> int:
         return self.mode_to_index(self.current_mode)
 
+    @property
+    def shared_state(self) -> BenjaminSharedState:
+        return self._normal_expert.shared_state
+
     def set_pending_mode(self, mode_choice: ModeChoice) -> None:
         self._pending_mode = self._normalise_mode_choice(mode_choice)
 
@@ -123,19 +127,16 @@ class BenjaminNetanyahu(controller.Controller):
         return current_tile.character.health
 
     def _resolve_mode_choice(self, knowledge: characters.ChampionKnowledge) -> BenjaminMode:
-        # Temporary: force simple HP-based mode switching for smoke-testing.
-        # Keep integration hooks commented out so we can restore model-based routing quickly.
-        #
-        # if self._pending_mode is not None:
-        #     chosen_mode = self._pending_mode
-        #     self._pending_mode = None
-        #     return chosen_mode
-        # if self._mode_selector is not None:
-        #     try:
-        #         mode_choice = self._mode_selector(knowledge, self.current_mode, self._turns_taken)
-        #         return self._normalise_mode_choice(mode_choice)
-        #     except Exception:
-        #         return self.current_mode
+        if self._pending_mode is not None:
+            chosen_mode = self._pending_mode
+            self._pending_mode = None
+            return chosen_mode
+        if self._mode_selector is not None:
+            try:
+                mode_choice = self._mode_selector(knowledge, self.current_mode, self._turns_taken)
+                return self._normalise_mode_choice(mode_choice)
+            except Exception:
+                return self.current_mode
         return self._choose_mode(knowledge)
 
     @staticmethod
