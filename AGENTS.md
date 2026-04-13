@@ -515,3 +515,101 @@ Najprostszy curriculum:
 3. Koniec: wiecej `AgressiveBot` + `DummyBot` (presja + domykanie).
 
 Wazne: trzymaj stale zasady silnika miedzy treningiem i ewaluacja.
+
+## 29. RL infra BenjaminNetanyahu (aktualny stan)
+
+Ta sekcja opisuje obecny, dzialajacy pipeline RL dla meta-bota Benjamin.
+
+### 29.1 Cel RL i action space
+
+RL nie steruje surowymi akcjami (`TURN/STEP/ATTACK`), tylko wybiera styl bota.
+
+Aktualny action space:
+
+- `0`: `normal`
+- `1`: `aggressive`
+- `2`: `passive`
+- `3`: `super_aggressive`
+
+Jedna akcja RL = wybor stylu na `mode_horizon_turns` tur (domyslnie 3).
+
+### 29.2 Gdzie jest kod
+
+- Trening:
+  - `scripts/train_benjamin_rl.py`
+  - `gupb/training/rl/benjamin/env.py`
+  - `gupb/training/rl/dqn.py`
+  - `gupb/training/rl/reward.py`
+- Runtime bota:
+  - `gupb/controller/benjamin_netanyahu/benjamin_netanyahu.py`
+  - `gupb/controller/benjamin_netanyahu/inference_mode_selector.py`
+  - style: `normal_mode.py`, `aggressive_mode.py`, `passive_mode.py`, `super_aggressive_mode.py`
+  - feature extraction: `gupb/controller/benjamin_netanyahu/mode_features.py`
+
+### 29.3 Architektura sieci i wejscie
+
+- DQN MLP: `input -> 128 -> 64 -> action_dim`.
+- Aktualny `FEATURE_DIM = 41` (w tym one-hot aktualnego stylu dla 4 trybow).
+- Wyjscie: `Q` dla 4 akcji (stylow).
+
+### 29.4 Reward (aktualne defaulty)
+
+W `RewardConfig`:
+
+- `win_reward = +100`
+- `second_place_reward = +20`
+- `death_penalty = -25`
+- `hp_loss_penalty = 0.8 * hp_delta` (dla ujemnego `hp_delta`)
+- heal bonus: `0.4 * hp_gain`, cap `+2.0`
+- `weapon_upgrade_bonus = +0.5 * delta_rank`
+- `mist_penalty = -0.25`
+- `fire_penalty = -0.35`
+- `stall_penalty = -0.06`
+- `survival_progress_bonus = +0.15 * (spadek liczby zywych), gdy Benjamin nadal zyje`
+
+### 29.5 CUDA trening vs CPU inferencja (wymaganie deploymentowe)
+
+- Trening lokalny moze byc na CUDA (`--device cuda`).
+- Inferencja turniejowa musi dzialac CPU-only:
+  - checkpoint ladowany przez `torch.load(..., map_location="cpu")`,
+  - `model.eval()` + `torch.no_grad()`,
+  - brak wymagania GPU w runtime.
+- Zapis checkpointu: `state_dict` + metadane (`input_dim`, `action_dim`, `config`), bez picklowania calego modelu.
+
+### 29.6 Komendy referencyjne
+
+Trening (przyklad run):
+
+```powershell
+python -m scripts.train_benjamin_rl `
+  --device cuda `
+  --episodes 2000 `
+  --mode-horizon 3 `
+  --checkpoint-every 250 `
+  --checkpoint-dir .\results\checkpoints_run4 `
+  --checkpoint-prefix benjamin_dqn_run4 `
+  --save-path .\results\benjamin_dqn_run4_ep2000.pt
+```
+
+Benchmark DQN (pool: Benjamin + Aggressive + Coward + 3x Dummy):
+
+```powershell
+$env:BENJAMIN_DQN_CHECKPOINT=".\results\checkpoints_run4\benjamin_dqn_run4_ep2000.pt"
+.\.venv\Scripts\python.exe -m gupb -c gupb/custom_configs/benjamin_dqn_cpu_dummy_trio_parallel_config.py
+```
+
+Benchmark DQN vs random:
+
+```powershell
+$env:BENJAMIN_DQN_CHECKPOINT=".\results\checkpoints_run4\benjamin_dqn_run4_ep2000.pt"
+.\.venv\Scripts\python.exe -m gupb -c gupb/custom_configs/benjamin_dqn_cpu_vs_random_parallel_config.py
+```
+
+### 29.7 Wazne uwagi ewaluacyjne
+
+- Train/eval musza miec ten sam `mode_horizon` (aktualnie 3).
+- Przy `runner_parallel` JSON ma eventy `ParallelGameSummaryReport` (z `winner_name`), a niekoniecznie `ControllerScoreReport`.
+- Przy porownaniach checkpointow patrz glownie na:
+  - `First-place rates`,
+  - arena breakdown,
+  - stabilnosc wyniku na 400 grach.
